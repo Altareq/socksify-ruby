@@ -92,43 +92,60 @@ class SOCKSError < RuntimeError
 end
 
 class TCPSocket
-  @@socks_version ||= "5"
-  
+  class << self
+    %w[socks_server socks_port socks_username socks_password].each do |new_method_name|
+      define_method new_method_name do
+        if Thread.current.respond_to? :thread_variable_get
+          Thread.current.thread_variable_get(new_method_name)
+        else
+          Thread.current[new_method_name]
+        end
+      end
+    end
+
+    %w[socks_server socks_port socks_username socks_password socks_ignores].each do |new_method_name|
+      define_method "#{new_method_name}=" do |val|
+        if Thread.current.respond_to? :thread_variable_set
+          Thread.current.thread_variable_set(new_method_name, val)
+        else
+          Thread.current[new_method_name] = val
+        end
+      end
+    end
+  end
+
   def self.socks_version
-    (@@socks_version == "4a" or @@socks_version == "4") ? "\004" : "\005"
+    default = '5'
+    if Thread.current.respond_to?(:thread_variable_get)
+      version = Thread.current.thread_variable_get('socks_version')
+
+      version.nil? ? Thread.current.thread_variable_set('socks_version', default) : version
+    else
+      version = Thread.current['socks_version']
+
+      version.nil? ? Thread.current['socks_version'] = default : version
+    end
   end
+
   def self.socks_version=(version)
-    @@socks_version = version.to_s
+    Thread.current.respond_to?(:thread_variable_get) ? Thread.current.thread_variable_set('socks_version', version.to_s) : Thread.current['socks_version']
   end
-  def self.socks_server
-    @@socks_server ||= nil
+
+  def self.encoded_socks_version
+    (socks_version == "4a" or socks_version == "4") ? "\004" : "\005"
   end
-  def self.socks_server=(host)
-    @@socks_server = host
-  end
-  def self.socks_port
-    @@socks_port ||= nil
-  end
-  def self.socks_port=(port)
-    @@socks_port = port
-  end
-  def self.socks_username
-    @@socks_username ||= nil
-  end
-  def self.socks_username=(username)
-    @@socks_username = username
-  end
-  def self.socks_password
-    @@socks_password ||= nil
-  end
-  def self.socks_password=(password)
-    @@socks_password = password
-  end
+
   def self.socks_ignores
-    @@socks_ignores ||= %w(localhost)
-  end
-  def self.socks_ignores=(ignores)
-    @@socks_ignores = ignores
+    default = %w(localhost)
+    if Thread.current.respond_to?(:thread_variable_get)
+      version = Thread.current.thread_variable_get('socks_ignores')
+
+      version.nil? ? Thread.current.thread_variable_set('socks_ignores', default) : version
+    else
+      version = Thread.current['socks_ignores']
+
+      version.nil? ? Thread.current['socks_ignores'] = default : version
+    end
   end
 
   class SOCKSConnectionPeerAddress < String
@@ -168,7 +185,7 @@ class TCPSocket
       Socksify::debug_notice "Connecting to SOCKS server #{socks_server}:#{socks_port}"
       initialize_tcp socks_server, socks_port
 
-      socks_authenticate unless @@socks_version =~ /^4/
+      socks_authenticate unless TCPSocket::socks_version =~ /^4/
 
       if host
         socks_connect(host, port)
@@ -221,42 +238,40 @@ class TCPSocket
   # Connect
   def socks_connect(host, port)
     port = Socket.getservbyname(port) if port.is_a?(String)
-    req = String.new
     Socksify::debug_debug "Sending destination address"
-    req << TCPSocket.socks_version
-    Socksify::debug_debug TCPSocket.socks_version.unpack "H*"
-    req << "\001"
-    req << "\000" if @@socks_version == "5"
-    req << [port].pack('n') if @@socks_version =~ /^4/
+    write TCPSocket::encoded_socks_version
+    Socksify::debug_debug TCPSocket::encoded_socks_version.unpack "H*"
+    write "\001"
+    write "\000" if TCPSocket::socks_version == "5"
+    write [port].pack('n') if TCPSocket::socks_version =~ /^4/
 
-    if @@socks_version == "4"
+    if TCPSocket::socks_version == "4"
       host = Resolv::DNS.new.getaddress(host).to_s
     end
     Socksify::debug_debug host
     if host =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/  # to IPv4 address
-      req << "\001" if @@socks_version == "5"
+      write "\001" if TCPSocket::socks_version == "5"
       _ip = [$1.to_i,
              $2.to_i,
              $3.to_i,
              $4.to_i
             ].pack('CCCC')
-      req << _ip
+      write _ip
     elsif host =~ /^[:0-9a-f]+$/  # to IPv6 address
       raise "TCP/IPv6 over SOCKS is not yet supported (inet_pton missing in Ruby & not supported by Tor"
-      req << "\004"
+      write "\004"
     else                          # to hostname
-      if @@socks_version == "5"
-        req << "\003" + [host.size].pack('C') + host
+      if TCPSocket::socks_version == "5"
+        write "\003" + [host.size].pack('C') + host
       else
-        req << "\000\000\000\001"
-        req << "\007\000"
+        write "\000\000\000\001"
+        write "\007\000"
         Socksify::debug_notice host
-        req << host
-        req << "\000"
+        write host
+        write "\000"
       end
     end
-    req << [port].pack('n') if @@socks_version == "5"
-    write req
+    write [port].pack('n') if TCPSocket::socks_version == "5"
 
     socks_receive_reply
     Socksify::debug_notice "Connected to #{host}:#{port} over SOCKS"
@@ -265,7 +280,7 @@ class TCPSocket
   # returns [bind_addr: String, bind_port: Fixnum]
   def socks_receive_reply
     Socksify::debug_debug "Waiting for SOCKS reply"
-    if @@socks_version == "5"
+    if TCPSocket::socks_version == "5"
       connect_reply = recv(4)
       if connect_reply.empty?
         raise SOCKSError.new("Server doesn't reply")
@@ -323,24 +338,22 @@ module Socksify
     s = TCPSocket.new
 
     begin
-      req = String.new
       Socksify::debug_debug "Sending hostname to resolve: #{host}"
-      req << "\005"
+      s.write "\005"
       if host =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/  # to IPv4 address
-        req << "\xF1\000\001" + [$1.to_i,
+        s.write "\xF1\000\001" + [$1.to_i,
                                   $2.to_i,
                                   $3.to_i,
                                   $4.to_i
                                  ].pack('CCCC')
       elsif host =~ /^[:0-9a-f]+$/  # to IPv6 address
         raise "TCP/IPv6 over SOCKS is not yet supported (inet_pton missing in Ruby & not supported by Tor"
-        req << "\004"
+        s.write "\004"
       else                          # to hostname
-        req << "\xF0\000\003" + [host.size].pack('C') + host
+        s.write "\xF0\000\003" + [host.size].pack('C') + host
       end
-      req << [0].pack('n')  # Port
-      s.write req
-      
+      s.write [0].pack('n')  # Port
+
       addr, _port = s.socks_receive_reply
       Socksify::debug_notice "Resolved #{host} as #{addr} over SOCKS"
       addr
